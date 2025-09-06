@@ -162,10 +162,14 @@ app.get('/', (req, res) => {
 });
 // ---------------- API Endpoints ----------------
 app.post('/pair', async (req, res) => {
-    const { number } = req.body;
-    if (!number || !/^\+\d{10,15}$/.test(number)) {
+    let { number } = req.body;
+
+    if (!number || !/^\+?\d{10,15}$/.test(number)) {
         return res.status(400).json({ error: 'Invalid phone number. Use format: +1234567890' });
     }
+
+    // Remove the plus if present
+    number = number.replace(/^\+/, '');
 
     try {
         await startSocket(number, res);
