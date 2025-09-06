@@ -163,12 +163,10 @@ app.get('/', (req, res) => {
 // ---------------- API Endpoints ----------------
 app.post('/pair', async (req, res) => {
     let { number } = req.body;
-
     if (!number || !/^\+?\d{10,15}$/.test(number)) {
-        return res.status(400).json({ error: 'Invalid phone number. Use format: +1234567890' });
+        return res.status(400).json({ error: 'Invalid phone number. Use format: 1234567890 or +1234567890' });
     }
 
-    // Remove the plus if present
     number = number.replace(/^\+/, '');
 
     try {
