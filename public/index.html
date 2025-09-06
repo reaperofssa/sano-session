@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sano Pairing</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+    <div class="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+        <h1 class="text-2xl font-bold text-center text-blue-600 mb-4">Sano Pairing</h1>
+        <div class="space-y-4">
+            <div>
+                <label for="phoneNumber" class="block text-sm font-medium text-gray-700">Phone Number</label>
+                <input
+                    type="text"
+                    id="phoneNumber"
+                    placeholder="+1234567890"
+                    class="mt-1 w-full p-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+            </div>
+            <button
+                id="pairButton"
+                class="w-full bg-blue-600 text-white p-2 rounded-md hover:bg-blue-700 disabled:bg-gray-400"
+                onclick="startPairing()"
+            >
+                Get Pairing Code
+            </button>
+            <div id="pairingCode" class="hidden text-center text-lg font-semibold text-green-600"></div>
+            <div id="errorMessage" class="hidden text-center text-sm text-red-600"></div>
+            <div id="credsContainer" class="hidden mt-4">
+                <label class="block text-sm font-medium text-gray-700">Session ID</label>
+                <textarea
+                    id="base64Creds"
+                    class="mt-1 w-full p-2 border rounded-md h-32 resize-none"
+                    readonly
+                ></textarea>
+                <button
+                    id="copyButton"
+                    class="mt-2 w-full bg-green-600 text-white p-2 rounded-md hover:bg-green-700"
+                    onclick="copyCreds()"
+                >
+                    Copy Session ID
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let pollingInterval = null;
+
+        async function startPairing() {
+            const phoneNumber = document.getElementById('phoneNumber').value;
+            const pairButton = document.getElementById('pairButton');
+            const pairingCodeDiv = document.getElementById('pairingCode');
+            const errorMessageDiv = document.getElementById('errorMessage');
+            const credsContainer = document.getElementById('credsContainer');
+
+            // Reset UI
+            pairingCodeDiv.classList.add('hidden');
+            errorMessageDiv.classList.add('hidden');
+            credsContainer.classList.add('hidden');
+            pairButton.disabled = true;
+
+            if (!phoneNumber.match(/^\+\d{10,15}$/)) {
+                errorMessageDiv.textContent = 'Invalid phone number. Use format: +1234567890';
+                errorMessageDiv.classList.remove('hidden');
+                pairButton.disabled = false;
+                return;
+            }
+
+            try {
+                const response = await fetch('/pair', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ number: phoneNumber })
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    pairingCodeDiv.textContent = `Pairing Code: ${data.pairingCode}`;
+                    pairingCodeDiv.classList.remove('hidden');
+                    startPolling(phoneNumber);
+                } else {
+                    errorMessageDiv.textContent = data.error || 'Failed to get pairing code';
+                    errorMessageDiv.classList.remove('hidden');
+                }
+            } catch (error) {
+                errorMessageDiv.textContent = 'Error connecting to server';
+                errorMessageDiv.classList.remove('hidden');
+            } finally {
+                pairButton.disabled = false;
+            }
+        }
+
+        async function startPolling(phoneNumber) {
+            const credsContainer = document.getElementById('credsContainer');
+            const base64Creds = document.getElementById('base64Creds');
+            const errorMessageDiv = document.getElementById('errorMessage');
+
+            pollingInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/creds/${phoneNumber}`);
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        clearInterval(pollingInterval);
+                        base64Creds.value = data.base64Creds;
+                        credsContainer.classList.remove('hidden');
+                    } else if (response.status !== 404) {
+                        clearInterval(pollingInterval);
+                        errorMessageDiv.textContent = data.error || 'Error checking credentials';
+                        errorMessageDiv.classList.remove('hidden');
+                    }
+                } catch (error) {
+                    clearInterval(pollingInterval);
+                    errorMessageDiv.textContent = 'Error polling credentials';
+                    errorMessageDiv.classList.remove('hidden');
+                }
+            }, 5000); // Poll every 5 seconds
+        }
+
+        function copyCreds() {
+            const base64Creds = document.getElementById('base64Creds');
+            base64Creds.select();
+            document.execCommand('copy');
+            alert('Session ID copied to clipboard!');
+        }
+    </script>
+</body>
+</html>
