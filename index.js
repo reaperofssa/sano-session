@@ -98,8 +98,8 @@ async function startSocket(phoneNumber, res) {
                         const base64Creds = `Sano~${Buffer.from(creds).toString('base64')}`;
                         const userId = sock.user?.id || config.owner;
                         await sock.sendMessage(userId, { text: base64Creds });
-                        await sock.sendMessage(userId, { text: 'Welcome to Sano' });
-                        await sock.sendMessage(userId, { text: `Pair successful use above session id to pair` });
+                        await sock.sendMessage(userId, { text: 'ꜱᴀɴᴏ ᴍᴅ ꜱᴇꜱꜱɪᴏɴ ɢᴇɴᴇʀᴀᴛɪᴏɴ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ' });
+                        await sock.sendMessage(userId, { text: `ᴘᴀɪʀ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ ᴘᴜᴛ ᴀʙᴏᴠᴇ ꜱᴇꜱꜱɪᴏɴ ɪᴅ ɪɴ ᴄᴏɴꜰɪɢ.ᴊꜱ ᴛᴏ ᴘᴀɪʀ ᴀɴᴅ ꜱᴛᴀʀᴛ ʙᴏᴛ` });
                         log(`Sent creds and welcome messages to ${userId}`);
 
                         // Close socket and remove session
@@ -154,7 +154,12 @@ async function startSocket(phoneNumber, res) {
 
     return sock;
 }
+app.use(express.static(join(__dirname, 'public')));
 
+// Optional: Explicit route for '/' (index.html)
+app.get('/', (req, res) => {
+    res.sendFile(join(__dirname, 'public/index.html'));
+});
 // ---------------- API Endpoints ----------------
 app.post('/pair', async (req, res) => {
     const { number } = req.body;
