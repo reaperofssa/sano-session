@@ -61,7 +61,40 @@ const scheduleSessionCleanup = (phoneNumber, delay = 5 * 60 * 1000) => { // 5 mi
     }, delay);
 };
 
-// ---------------- Socket Starter (Mimicking bot exactly) ----------------
+// ---------------- Reconnection Logic ----------------
+const reconnectWithBackoff = async (phoneNumber, maxRetries = 5) => {
+    let retryCount = 0;
+    const baseDelay = 5000; // Start with 5 seconds
+    const maxDelay = 30000; // Max delay of 30 seconds
+
+    const attemptReconnect = async () => {
+        if (retryCount >= maxRetries) {
+            errorLog(`Max retries (${maxRetries}) reached for ${phoneNumber}. Giving up.`);
+            userSockets.delete(phoneNumber);
+            pairingStates.delete(phoneNumber);
+            const sessionDir = join(SESSION_DIR, phoneNumber);
+            rmSync(sessionDir, { recursive: true, force: true });
+            return;
+        }
+
+        const delay = Math.min(baseDelay * Math.pow(2, retryCount), maxDelay);
+        retryCount++;
+        log(`Attempting reconnection ${retryCount}/${maxRetries} for ${phoneNumber} after ${delay}ms`);
+
+        setTimeout(async () => {
+            try {
+                await startSocket(phoneNumber); // No `res` as this is a reconnect
+            } catch (error) {
+                errorLog(`Reconnection failed for ${phoneNumber}: ${error.message}`);
+                attemptReconnect(); // Retry again
+            }
+        }, delay);
+    };
+
+    attemptReconnect();
+};
+
+// ---------------- Socket Starter ----------------
 async function startSocket(phoneNumber, res) {
     const sessionDir = join(SESSION_DIR, phoneNumber);
     if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
@@ -86,7 +119,7 @@ async function startSocket(phoneNumber, res) {
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0,
         version: [2, 3000, 1023223821],
-        keepAliveIntervalMs: 10000,
+        keepAliveIntervalMs: 5000, // Reduced to 5s for more frequent pings
         emitOwnEvents: true,
         fireInitQueries: true,
         generateHighQualityLinkPreview: true,
@@ -101,7 +134,17 @@ async function startSocket(phoneNumber, res) {
     // Store socket
     userSockets.set(phoneNumber, sock);
 
-    // Connection handler (exactly like bot)
+    // Enhanced keep-alive mechanism
+    const keepAliveInterval = setInterval(() => {
+        if (sock.ws?.readyState === 1) {
+            sock.ws.ping?.();
+            log(`Sent keep-alive ping for ${phoneNumber}`);
+        } else {
+            log(`WebSocket not open for ${phoneNumber}, readyState: ${sock.ws?.readyState}`);
+        }
+    }, 5000); // Ping every 5 seconds
+
+    // Connection handler
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
         const reason = lastDisconnect?.error?.output?.statusCode;
@@ -110,7 +153,10 @@ async function startSocket(phoneNumber, res) {
             case "open":
                 console.log(chalk.green(`✅ Connected for ${phoneNumber}`));
                 
-                // Wait a moment for creds to be fully written
+                // Clear keep-alive interval
+                clearInterval(keepAliveInterval);
+
+                // Wait for creds to be written
                 setTimeout(async () => {
                     try {
                         const credsPath = join(sessionDir, 'creds.json');
@@ -118,7 +164,6 @@ async function startSocket(phoneNumber, res) {
                             const creds = readFileSync(credsPath, 'utf8');
                             const base64Creds = `Sano~${Buffer.from(creds).toString('base64')}`;
                             
-                            // Send to bot user (owner)
                             const userId = sock.user?.id || config.owner;
                             await sock.sendMessage(userId, { text: base64Creds });
                             await sock.sendMessage(userId, { text: 'ꜱᴀɴᴏ ᴍᴅ ꜱᴇꜱꜱɪᴏɴ ɢᴇɴᴇʀᴀᴛɪᴏɴ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ' });
@@ -126,23 +171,20 @@ async function startSocket(phoneNumber, res) {
                             
                             log(`Sent session credentials to ${userId}`);
 
-                            // Update pairing state
                             pairingStates.set(phoneNumber, {
                                 status: 'completed',
                                 base64Creds,
                                 timestamp: Date.now()
                             });
 
-                            // Close socket immediately after sending
+                            // Close socket after sending
                             setTimeout(() => {
                                 sock.end();
+                                clearInterval(keepAliveInterval);
                                 userSockets.delete(phoneNumber);
                                 log(`Closed socket for ${phoneNumber} after sending session`);
-                                
-                                // Schedule cleanup
                                 scheduleSessionCleanup(phoneNumber);
                             }, 2000);
-
                         } else {
                             errorLog(`No creds.json found for ${phoneNumber} after connection`);
                         }
@@ -154,6 +196,8 @@ async function startSocket(phoneNumber, res) {
 
             case "close":
                 console.log(chalk.red(`⚠️ Lost connection for ${phoneNumber}. Reason: ${reason}`));
+                clearInterval(keepAliveInterval);
+
                 if (reason === DisconnectReason.loggedOut || reason === 401) {
                     console.log(chalk.red(`❌ Authentication failed for ${phoneNumber}. Cleaning session.`));
                     userSockets.delete(phoneNumber);
@@ -164,9 +208,12 @@ async function startSocket(phoneNumber, res) {
                     userSockets.delete(phoneNumber);
                     pairingStates.delete(phoneNumber);
                     rmSync(sessionDir, { recursive: true, force: true });
+                } else if (reason === 428) {
+                    console.log(chalk.yellow(`🔄 Connection closed (428 - Precondition Required) for ${phoneNumber}. Attempting reconnect...`));
+                    reconnectWithBackoff(phoneNumber); // Trigger reconnection
                 } else {
-                    // Don't retry automatically for pairing server
-                    console.log(chalk.yellow(`🔄 Connection closed (${reason}) for ${phoneNumber}`));
+                    console.log(chalk.yellow(`🔄 Connection closed (${reason}) for ${phoneNumber}. Attempting reconnect...`));
+                    reconnectWithBackoff(phoneNumber); // Trigger reconnection for other reasons
                 }
                 break;
 
@@ -179,23 +226,20 @@ async function startSocket(phoneNumber, res) {
         }
     });
 
-    // Handle pairing (exactly like bot)
+    // Handle pairing
     if (!sock.authState.creds.registered) {
         try {
-            // Request pairing code
             let code = await sock.requestPairingCode(phoneNumber);
             code = code?.match(/.{1,4}/g)?.join("-") || code;
             
             log(`Generated pairing code ${code} for ${phoneNumber}`);
             
-            // Set initial pairing state
             pairingStates.set(phoneNumber, {
                 status: 'pending',
                 pairingCode: code,
                 timestamp: Date.now()
             });
 
-            // Return pairing code to client
             if (res && !res.headersSent) {
                 res.json({ 
                     success: true,
@@ -204,17 +248,10 @@ async function startSocket(phoneNumber, res) {
                 });
             }
 
-            // Set up connection monitoring (like in bot)
-            const interval = setInterval(() => {
-                if (sock.ws?.readyState === 1) {
-                    sock.ws.ping?.();
-                }
-            }, 1500);
-
             // Monitor for completion
             const checkCompletion = () => {
                 if (sock.authState.creds.registered) {
-                    clearInterval(interval);
+                    clearInterval(keepAliveInterval);
                     sock.ev.off('creds.update', checkCompletion);
                     log(`Pairing completed for ${phoneNumber}`);
                 }
@@ -224,6 +261,7 @@ async function startSocket(phoneNumber, res) {
 
         } catch (error) {
             errorLog(`Error generating pairing code for ${phoneNumber}: ${error.message}`);
+            clearInterval(keepAliveInterval);
             if (res && !res.headersSent) {
                 res.status(500).json({ 
                     success: false,
@@ -238,6 +276,7 @@ async function startSocket(phoneNumber, res) {
                 error: 'Phone number already registered' 
             });
         }
+        clearInterval(keepAliveInterval);
     }
 
     return sock;
@@ -264,10 +303,8 @@ app.post('/pair', async (req, res) => {
         });
     }
 
-    // Clean number format
     number = number.replace(/^\+/, '');
 
-    // Check if already pairing
     if (userSockets.has(number)) {
         return res.status(400).json({
             success: false,
@@ -310,7 +347,7 @@ app.get('/status/:number', (req, res) => {
     });
 });
 
-// Get session (only works after pairing is complete)
+// Get session
 app.get('/session/:number', (req, res) => {
     let { number } = req.params;
     number = number.replace(/^\+/, '');
