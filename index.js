@@ -168,7 +168,7 @@ async function startSocket(phoneNumber, res) {
                                 const userId = sock.user?.id || config.owner;
                                 await sock.sendMessage(userId, { text: base64Creds });
                                 await sock.sendMessage(userId, { text: 'ꜱᴀɴᴏ ᴍᴅ ꜱᴇꜱꜱɪᴏɴ ɢᴇɴᴇʀᴀᴛɪᴏɴ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ' });
-                                await sock.sendMessage(userId, { text: `ᴘᴀɪʀ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ ᴘᴜᴛ ᴀʙᴏᴠᴇ ꜱᴇꜱꜱɪᴏɴ ɪᴅ ɪɴ ᴄᴏɴꜰɪɢ.ᴊꜱ ᴛᴏ ᴘᴀɪʀ ᴀɴᴅ ꜱᴛᴀʀᴛ ʙᴏᴛ` });
+                                await sock.sendMessage(userId, { text: `ᴘᴀɪʀ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ ᴘᴜᴛ ᴀʙᴏᴠᴇ ꜱᴇꜱꜱɪᴏɴ ɪᴅ ɪɴ ᴄᴏɴꜰɪɢ.ᴊꜸ ᴛᴏ ᴘᴀɪʀ ᴀɴᴅ ꜱᴛᴀʀᴛ ʙᴏᴛ` });
                                 
                                 log(`Sent session credentials to ${userId}`);
 
@@ -267,8 +267,7 @@ async function startSocket(phoneNumber, res) {
                 const checkCompletion = () => {
                     if (sock.authState.creds.registered) {
                         clearInterval(keepAliveInterval);
-                        sock.ev.off('cr
-System: eds.update', checkCompletion);
+                        sock.ev.off('creds.update', checkCompletion); // Fixed line
                         log(`Pairing completed for ${phoneNumber}`);
                     }
                 };
