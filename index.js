@@ -49,7 +49,7 @@ const pairingStates = new Map();
 const getRandomColor = () => `#${Math.floor(Math.random() * 16777215).toString(16).padStart(6, "0")}`;
 
 // Clean up session after delay
-const scheduleSessionCleanup = (phoneNumber, delay = 5 * 60 * 1000) => { // 5 minutes
+const scheduleSessionCleanup = (phoneNumber, delay = 5 * 60 * 1000) => {
     setTimeout(() => {
         const sessionDir = join(SESSION_DIR, phoneNumber);
         if (existsSync(sessionDir)) {
@@ -61,22 +61,53 @@ const scheduleSessionCleanup = (phoneNumber, delay = 5 * 60 * 1000) => { // 5 mi
     }, delay);
 };
 
-// ---------------- Socket Starter (Adapted from Bot Script) ----------------
+// ---------------- Socket Starter ----------------
 async function startSocket(phoneNumber, res) {
     const sessionDir = join(SESSION_DIR, phoneNumber);
     if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
 
     let authState;
-    try {
-        authState = await useMultiFileAuthState(sessionDir);
-    } catch (e) {
-        errorLog(`Session error for ${phoneNumber}. Starting fresh.`);
-        rmSync(sessionDir, { recursive: true, force: true });
-        mkdirSync(sessionDir, { recursive: true });
-        authState = await useMultiFileAuthState(sessionDir);
-    }
+    let retryCount = 0;
+    const maxRetries = 3; // Limit retries to avoid rate limiting
+    const retryDelays = {
+        428: 10000, // 10s for Precondition Required
+        408: 5000,  // 5s for Connection Lost
+        440: 2000,  // 2s for Restart Required
+        500: 5000,  // 5s for Internal Server Error
+        503: 60000, // 1m for Service Unavailable
+        515: 2000,  // 2s for Multi-device Mismatch
+        default: 5000 // 5s for others
+    };
 
     const startConnection = async () => {
+        if (retryCount >= maxRetries) {
+            errorLog(`Max retries (${maxRetries}) reached for ${phoneNumber}. Aborting.`);
+            if (res && !res.headersSent) {
+                res.status(500).json({
+                    success: false,
+                    error: 'Max pairing retries reached. Try again later or use a different number.'
+                });
+            }
+            scheduleSessionCleanup(phoneNumber, 1000);
+            return;
+        }
+
+        // Clean session before retry to avoid corrupted state
+        if (retryCount > 0) {
+            rmSync(sessionDir, { recursive: true, force: true });
+            mkdirSync(sessionDir, { recursive: true });
+            log(`Cleared session for ${phoneNumber} before retry ${retryCount + 1}`);
+        }
+
+        try {
+            authState = await useMultiFileAuthState(sessionDir);
+        } catch (e) {
+            errorLog(`Session error for ${phoneNumber}. Starting fresh.`);
+            rmSync(sessionDir, { recursive: true, force: true });
+            mkdirSync(sessionDir, { recursive: true });
+            authState = await useMultiFileAuthState(sessionDir);
+        }
+
         const { version } = await fetchLatestBaileysVersion();
         log(`Using WhatsApp v${version.join('.')} for ${phoneNumber}`);
 
@@ -87,7 +118,7 @@ async function startSocket(phoneNumber, res) {
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 0,
             version,
-            keepAliveIntervalMs: 5000, // Frequent keep-alive
+            keepAliveIntervalMs: 1500, // Match bot's 1.5s interval
             emitOwnEvents: true,
             fireInitQueries: true,
             generateHighQualityLinkPreview: true,
@@ -104,15 +135,20 @@ async function startSocket(phoneNumber, res) {
 
         // Keep-alive ping
         const keepAliveInterval = setInterval(() => {
-            if (sock.ws?.readyState === 1) {
-                sock.ws.ping?.();
+            if (sock.ws && sock.ws.readyState === 1) {
+                sock.ws.ping();
                 log(`Sent keep-alive ping for ${phoneNumber}`);
             } else {
-                log(`WebSocket not open for ${phoneNumber}, readyState: ${sock.ws?.readyState}`);
+                log(`WebSocket not open for ${phoneNumber}, readyState: ${sock.ws?.readyState || 'undefined'}`);
             }
-        }, 1500); // Match bot's 1.5s ping interval
+        }, 1500);
 
-        // Connection handler (adapted from bot script)
+        // WebSocket error handling
+        sock.ws?.on('error', (err) => {
+            errorLog(`WebSocket error for ${phoneNumber}: ${err.message}`);
+        });
+
+        // Connection handler
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect } = update;
             const reason = lastDisconnect?.error?.output?.statusCode;
@@ -122,7 +158,6 @@ async function startSocket(phoneNumber, res) {
                     console.log(chalk.green(`✅ Connected for ${phoneNumber}`));
                     clearInterval(keepAliveInterval);
 
-                    // Wait for creds to be written
                     setTimeout(async () => {
                         try {
                             const credsPath = join(sessionDir, 'creds.json');
@@ -143,7 +178,6 @@ async function startSocket(phoneNumber, res) {
                                     timestamp: Date.now()
                                 });
 
-                                // Close socket after sending
                                 setTimeout(() => {
                                     sock.end();
                                     clearInterval(keepAliveInterval);
@@ -169,32 +203,28 @@ async function startSocket(phoneNumber, res) {
                         userSockets.delete(phoneNumber);
                         pairingStates.delete(phoneNumber);
                         rmSync(sessionDir, { recursive: true, force: true });
+                        if (res && !res.headersSent) {
+                            res.status(401).json({
+                                success: false,
+                                error: 'Authentication failed. Please try a different number or wait before retrying.'
+                            });
+                        }
                     } else if (reason === DisconnectReason.forbidden || reason === 403) {
                         console.log(chalk.red(`🚫 Banned for ${phoneNumber}.`));
                         userSockets.delete(phoneNumber);
                         pairingStates.delete(phoneNumber);
                         rmSync(sessionDir, { recursive: true, force: true });
-                    } else if (reason === DisconnectReason.connectionLost || reason === 408) {
-                        console.log(chalk.yellow(`⏳ Connection lost for ${phoneNumber}. Retrying in 5 seconds...`));
-                        setTimeout(() => startConnection(), 5000);
-                    } else if (reason === DisconnectReason.restartRequired || reason === 440) {
-                        console.log(chalk.red(`🛑 Session expired for ${phoneNumber}. Retrying...`));
-                        setTimeout(() => startConnection(), 2000);
-                    } else if (reason === DisconnectReason.internalServerError || reason === 500) {
-                        console.log(chalk.red(`⚡ Internal server error for ${phoneNumber}. Retrying in 5 seconds...`));
-                        setTimeout(() => startConnection(), 5000);
-                    } else if (reason === DisconnectReason.serviceUnavailable || reason === 503) {
-                        console.log(chalk.yellow(`🛠️ WhatsApp service unavailable for ${phoneNumber}. Retrying in 1 minute...`));
-                        setTimeout(() => startConnection(), 60000);
-                    } else if (reason === DisconnectReason.multideviceMismatch || reason === 515) {
-                        console.log(chalk.red(`⚠️ Multi-device mismatch for ${phoneNumber}. Retrying...`));
-                        setTimeout(() => startConnection(), 2000);
-                    } else if (reason === 428) {
-                        console.log(chalk.yellow(`🔄 Precondition required (428) for ${phoneNumber}. Retrying in 5 seconds...`));
-                        setTimeout(() => startConnection(), 5000);
+                        if (res && !res.headersSent) {
+                            res.status(403).json({
+                                success: false,
+                                error: 'Number banned. Please use a different number.'
+                            });
+                        }
                     } else {
-                        console.log(chalk.yellow(`🔄 Unknown disconnection (${reason}) for ${phoneNumber}. Retrying in 5 seconds...`));
-                        setTimeout(() => startConnection(), 5000);
+                        retryCount++;
+                        const delay = retryDelays[reason] || retryDelays.default;
+                        console.log(chalk.yellow(`🔄 Retrying (${retryCount}/${maxRetries}) for ${phoneNumber} in ${delay/1000}s due to reason ${reason}`));
+                        setTimeout(startConnection, delay);
                     }
                     break;
 
@@ -210,10 +240,14 @@ async function startSocket(phoneNumber, res) {
         // Handle pairing
         if (!sock.authState.creds.registered) {
             try {
-                let code = await sock.requestPairingCode(phoneNumber);
-                code = code?.match(/.{1,4}/g)?.join("-") || code;
-                
-                log(`Generated pairing code ${code} for ${phoneNumber}`);
+                // Reuse existing pairing code if available
+                let state = pairingStates.get(phoneNumber);
+                let code = state?.pairingCode;
+                if (!code || retryCount > 0) {
+                    code = await sock.requestPairingCode(phoneNumber);
+                    code = code?.match(/.{1,4}/g)?.join("-") || code;
+                    log(`Generated pairing code ${code} for ${phoneNumber}`);
+                }
                 
                 pairingStates.set(phoneNumber, {
                     status: 'pending',
@@ -229,11 +263,12 @@ async function startSocket(phoneNumber, res) {
                     });
                 }
 
-                // Monitor for pairing completion (adapted from bot)
+                // Monitor for pairing completion
                 const checkCompletion = () => {
                     if (sock.authState.creds.registered) {
                         clearInterval(keepAliveInterval);
-                        sock.ev.off('creds.update', checkCompletion);
+                        sock.ev.off('cr
+System: eds.update', checkCompletion);
                         log(`Pairing completed for ${phoneNumber}`);
                     }
                 };
