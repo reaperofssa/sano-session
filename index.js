@@ -48,17 +48,20 @@ const pairingStates = new Map();
 // ---------------- Utility functions ----------------
 const getRandomColor = () => `#${Math.floor(Math.random() * 16777215).toString(16).padStart(6, "0")}`;
 
+// Delay function to wait before requesting pairing code
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // Clean up session after delay
-const scheduleSessionCleanup = (phoneNumber, delay = 5 * 60 * 1000) => {
+const scheduleSessionCleanup = (phoneNumber, delayMs = 5 * 60 * 1000) => {
     setTimeout(() => {
         const sessionDir = join(SESSION_DIR, phoneNumber);
         if (existsSync(sessionDir)) {
             rmSync(sessionDir, { recursive: true, force: true });
-            log(`Auto-cleaned session for ${phoneNumber} after ${delay / 1000}s`);
+            log(`Auto-cleaned session for ${phoneNumber} after ${delayMs / 1000}s`);
         }
         userSockets.delete(phoneNumber);
         pairingStates.delete(phoneNumber);
-    }, delay);
+    }, delayMs);
 };
 
 // ---------------- Socket Starter ----------------
@@ -78,6 +81,7 @@ async function startSocket(phoneNumber, res) {
         515: 2000,  // 2s for Multi-device Mismatch
         default: 5000 // 5s for others
     };
+    const pairingCodeDelay = 2000; // 2s delay before requesting pairing code
 
     const startConnection = async () => {
         if (retryCount >= maxRetries) {
@@ -168,7 +172,7 @@ async function startSocket(phoneNumber, res) {
                                 const userId = sock.user?.id || config.owner;
                                 await sock.sendMessage(userId, { text: base64Creds });
                                 await sock.sendMessage(userId, { text: 'ꜱᴀɴᴏ ᴍᴅ ꜱᴇꜱꜱɪᴏɴ ɢᴇɴᴇʀᴀᴛɪᴏɴ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ' });
-                                await sock.sendMessage(userId, { text: `ᴘᴀɪʀ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ ᴘᴜᴛ ᴀʙᴏᴠᴇ ꜱᴇꜱꜱɪᴏɴ ɪᴅ ɪɴ ᴄᴏɴꜰɪɢ.ᴊꜸ ᴛᴏ ᴘᴀɪʀ ᴀɴᴅ ꜱᴛᴀʀᴛ ʙᴏᴛ` });
+                                await sock.sendMessage(userId, { text: `ᴘᴀɪʀ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ ᴘᴜᴛ ᴀʙᴏᴠᴇ ꜱᴇꜱꜱɪᴏɴ ɪᴅ ɪɴ ᴄᴏɴꜰɪɢ.ᴊꜱ ᴛᴏ ᴘᴀɪʀ ᴀɴᴅ ꜱᴛᴀʀᴛ ʙᴏᴛ` });
                                 
                                 log(`Sent session credentials to ${userId}`);
 
@@ -244,6 +248,9 @@ async function startSocket(phoneNumber, res) {
                 let state = pairingStates.get(phoneNumber);
                 let code = state?.pairingCode;
                 if (!code || retryCount > 0) {
+                    // Add delay before requesting pairing code
+                    log(`Waiting ${pairingCodeDelay}ms before requesting pairing code for ${phoneNumber}`);
+                    await delay(pairingCodeDelay);
                     code = await sock.requestPairingCode(phoneNumber);
                     code = code?.match(/.{1,4}/g)?.join("-") || code;
                     log(`Generated pairing code ${code} for ${phoneNumber}`);
@@ -267,7 +274,7 @@ async function startSocket(phoneNumber, res) {
                 const checkCompletion = () => {
                     if (sock.authState.creds.registered) {
                         clearInterval(keepAliveInterval);
-                        sock.ev.off('creds.update', checkCompletion); // Fixed line
+                        sock.ev.off('creds.update', checkCompletion);
                         log(`Pairing completed for ${phoneNumber}`);
                     }
                 };
