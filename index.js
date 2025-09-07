@@ -85,7 +85,7 @@ async function startSocket(phoneNumber, res) {
         auth: authState.state,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 0,
-        version,
+        version: [2, 3000, 1023223821],
         keepAliveIntervalMs: 10000,
         emitOwnEvents: true,
         fireInitQueries: true,
