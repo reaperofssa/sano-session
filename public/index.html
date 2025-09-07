@@ -28,6 +28,7 @@
                 Get Pairing Code
             </button>
             <div id="pairingCode" class="hidden text-center text-lg font-semibold text-green-600"></div>
+            <div id="statusMessage" class="hidden text-center text-sm text-blue-600"></div>
             <div id="errorMessage" class="hidden text-center text-sm text-red-600"></div>
             <div id="credsContainer" class="hidden mt-4">
                 <label class="block text-sm font-medium text-gray-700">Session ID</label>
@@ -54,16 +55,23 @@
             const phoneNumber = document.getElementById('phoneNumber').value;
             const pairButton = document.getElementById('pairButton');
             const pairingCodeDiv = document.getElementById('pairingCode');
+            const statusMessageDiv = document.getElementById('statusMessage');
             const errorMessageDiv = document.getElementById('errorMessage');
             const credsContainer = document.getElementById('credsContainer');
 
             // Reset UI
             pairingCodeDiv.classList.add('hidden');
+            statusMessageDiv.classList.add('hidden');
             errorMessageDiv.classList.add('hidden');
             credsContainer.classList.add('hidden');
             pairButton.disabled = true;
 
-            // ✅ Validate only numbers (10–15 digits)
+            // Clear any existing polling
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+            }
+
+            // Validate only numbers (10–15 digits)
             if (!/^\d{10,15}$/.test(phoneNumber)) {
                 errorMessageDiv.textContent = 'Invalid phone number. Only digits allowed (10–15 digits)';
                 errorMessageDiv.classList.remove('hidden');
@@ -79,9 +87,11 @@
                 });
                 const data = await response.json();
 
-                if (response.ok) {
+                if (response.ok && data.success) {
                     pairingCodeDiv.textContent = `Pairing Code: ${data.pairingCode}`;
                     pairingCodeDiv.classList.remove('hidden');
+                    statusMessageDiv.textContent = 'Enter the code in WhatsApp to complete pairing...';
+                    statusMessageDiv.classList.remove('hidden');
                     startPolling(phoneNumber);
                 } else {
                     errorMessageDiv.textContent = data.error || 'Failed to get pairing code';
@@ -98,26 +108,67 @@
         async function startPolling(phoneNumber) {
             const credsContainer = document.getElementById('credsContainer');
             const base64Creds = document.getElementById('base64Creds');
+            const statusMessageDiv = document.getElementById('statusMessage');
             const errorMessageDiv = document.getElementById('errorMessage');
+            
+            let pollCount = 0;
+            const maxPolls = 60; // 5 minutes (5 seconds * 60)
 
             pollingInterval = setInterval(async () => {
-                try {
-                    const response = await fetch(`/creds/${phoneNumber}`);
-                    const data = await response.json();
+                pollCount++;
+                
+                // Stop polling after 5 minutes
+                if (pollCount > maxPolls) {
+                    clearInterval(pollingInterval);
+                    errorMessageDiv.textContent = 'Pairing timeout. Please try again.';
+                    errorMessageDiv.classList.remove('hidden');
+                    statusMessageDiv.classList.add('hidden');
+                    return;
+                }
 
-                    if (response.ok) {
+                try {
+                    // First check status
+                    const statusResponse = await fetch(`/status/${phoneNumber}`);
+                    const statusData = await statusResponse.json();
+
+                    if (statusResponse.ok && statusData.success) {
+                        if (statusData.status === 'completed') {
+                            // Pairing completed, get session
+                            clearInterval(pollingInterval);
+                            statusMessageDiv.textContent = 'Pairing completed! Getting session...';
+                            
+                            try {
+                                const sessionResponse = await fetch(`/session/${phoneNumber}`);
+                                const sessionData = await sessionResponse.json();
+                                
+                                if (sessionResponse.ok && sessionData.success) {
+                                    base64Creds.value = sessionData.sessionId;
+                                    credsContainer.classList.remove('hidden');
+                                    statusMessageDiv.textContent = 'Session ready! Session has also been sent to your WhatsApp.';
+                                } else {
+                                    errorMessageDiv.textContent = sessionData.error || 'Failed to get session';
+                                    errorMessageDiv.classList.remove('hidden');
+                                    statusMessageDiv.classList.add('hidden');
+                                }
+                            } catch (error) {
+                                errorMessageDiv.textContent = 'Error getting session';
+                                errorMessageDiv.classList.remove('hidden');
+                                statusMessageDiv.classList.add('hidden');
+                            }
+                        } else if (statusData.status === 'pending') {
+                            // Still waiting for pairing
+                            statusMessageDiv.textContent = `Waiting for pairing... (${Math.floor(pollCount * 5 / 60)}:${String(pollCount * 5 % 60).padStart(2, '0')})`;
+                        }
+                    } else if (statusResponse.status === 404) {
+                        // Session not found, might have expired
                         clearInterval(pollingInterval);
-                        base64Creds.value = data.base64Creds;
-                        credsContainer.classList.remove('hidden');
-                    } else if (response.status !== 404) {
-                        clearInterval(pollingInterval);
-                        errorMessageDiv.textContent = data.error || 'Error checking credentials';
+                        errorMessageDiv.textContent = 'Pairing session expired. Please try again.';
                         errorMessageDiv.classList.remove('hidden');
+                        statusMessageDiv.classList.add('hidden');
                     }
                 } catch (error) {
-                    clearInterval(pollingInterval);
-                    errorMessageDiv.textContent = 'Error polling credentials';
-                    errorMessageDiv.classList.remove('hidden');
+                    // Don't stop polling on network errors, just continue
+                    console.error('Polling error:', error);
                 }
             }, 5000); // Poll every 5 seconds
         }
@@ -125,9 +176,52 @@
         function copyCreds() {
             const base64Creds = document.getElementById('base64Creds');
             base64Creds.select();
-            document.execCommand('copy');
-            alert('Session ID copied to clipboard!');
+            base64Creds.setSelectionRange(0, 99999); // For mobile devices
+            
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) {
+                    showCopySuccess();
+                } else {
+                    // Fallback for modern browsers
+                    navigator.clipboard.writeText(base64Creds.value).then(() => {
+                        showCopySuccess();
+                    }).catch(() => {
+                        alert('Please manually copy the session ID');
+                    });
+                }
+            } catch (err) {
+                // Modern clipboard API fallback
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(base64Creds.value).then(() => {
+                        showCopySuccess();
+                    }).catch(() => {
+                        alert('Please manually copy the session ID');
+                    });
+                } else {
+                    alert('Please manually copy the session ID');
+                }
+            }
         }
+
+        function showCopySuccess() {
+            const copyButton = document.getElementById('copyButton');
+            const originalText = copyButton.textContent;
+            copyButton.textContent = 'Copied!';
+            copyButton.className = copyButton.className.replace('bg-green-600 hover:bg-green-700', 'bg-blue-600 hover:bg-blue-700');
+            
+            setTimeout(() => {
+                copyButton.textContent = originalText;
+                copyButton.className = copyButton.className.replace('bg-blue-600 hover:bg-blue-700', 'bg-green-600 hover:bg-green-700');
+            }, 2000);
+        }
+
+        // Clean up polling if user leaves page
+        window.addEventListener('beforeunload', () => {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+            }
+        });
     </script>
 </body>
 </html>
