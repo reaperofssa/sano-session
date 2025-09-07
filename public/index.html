@@ -15,8 +15,9 @@
                 <input
                     type="text"
                     id="phoneNumber"
-                    placeholder="+1234567890"
+                    placeholder="1234567890"
                     class="mt-1 w-full p-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    oninput="this.value = this.value.replace(/\\D/g, '')"
                 >
             </div>
             <button
@@ -62,8 +63,9 @@
             credsContainer.classList.add('hidden');
             pairButton.disabled = true;
 
-            if (!phoneNumber.match(/^\+\d{10,15}$/)) {
-                errorMessageDiv.textContent = 'Invalid phone number. Use format: +1234567890';
+            // ✅ Validate only numbers (10–15 digits)
+            if (!/^\d{10,15}$/.test(phoneNumber)) {
+                errorMessageDiv.textContent = 'Invalid phone number. Only digits allowed (10–15 digits)';
                 errorMessageDiv.classList.remove('hidden');
                 pairButton.disabled = false;
                 return;
